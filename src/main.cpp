@@ -7,6 +7,8 @@
 #include <math.h>
 #include <functional>
 
+#include <potracelib.h>
+
 #define LOG(preffix, fmt, ...) printf(preffix fmt "\n", __VA_ARGS__);
 #define LOG_ERROR(fmt, ...) LOG("EE ", fmt, __VA_ARGS__)
 #define LOG_DEBUG(fmt, ...) LOG("   ", fmt, __VA_ARGS__)
@@ -15,6 +17,13 @@
 #define WIN_ANALYZE "analyze"
 #define WIN_DEBUG "debug"
 
+
+typedef enum result {
+	OK,
+	ERROR_MORE_THAN_ONE_CHANNEL,
+} result;
+
+static result last_error;
 
 bool hist(cv::Mat img, std::array<unsigned int, 256>& bins) {
 	assert(img.type() == CV_8UC1);
@@ -56,9 +65,9 @@ void for_each_pixel(cv::Mat &image, std::function<void(uchar * const pixel, int 
 		rows = 1;
 	}
 
-	for (int j=0; j<rows; ++j) {
+	for (int j = 0; j < rows; ++j) {
 		auto pixel = image.ptr(j);
-		for (int i=0; i<cols; ++i, pixel += channels)
+		for (int i = 0; i < cols; ++i, pixel += channels)
 			fn(pixel, channels);
 	}
 }
@@ -77,6 +86,41 @@ void increase_colour_saturation(cv::Mat &image, uchar inc) {
 	cvtColor(hsv, image, CV_HSV2BGR);
 }
 
+
+potrace_bitmap_t* create_bm_from_Mat(cv::Mat img) {
+	if (img.channels() != 1) {
+		last_error = ERROR_MORE_THAN_ONE_CHANNEL;
+		return nullptr;
+	}
+	potrace_bitmap_t* bm = new potrace_bitmap_t();
+	int word_size = sizeof(potrace_word) * 8;
+	bm->w = img.cols;
+	bm->h = img.rows;
+	bm->dy = std::ceil(img.cols / word_size);
+	bm->map = new potrace_word[bm->h * bm->dy];
+
+	for (int j = 0; j < img.rows; ++j) {
+		auto pixel = img.ptr(img.rows - 1 - j);
+		for (int i = 0; i < img.cols; ++i) {
+			if (pixel != 0) {
+				auto word = (bm->map + j * bm->dy)[i / word_size];
+				word |= 1 << (i % word_size);
+			}
+			pixel += 1; // bcz img.channels() = 1;
+		}
+	}
+	return bm;
+}
+
+
+result release_bm(potrace_bitmap_t* bm) {
+	delete[] bm->map;
+	delete bm;
+	bm = nullptr;
+	return OK;
+}
+
+
 int main(int argc, char **argv) {
 	const std::string sourceInput = argv[1];
 	  cv::VideoCapture sourceCapture(atoi(sourceInput.c_str()));
@@ -91,57 +135,48 @@ int main(int argc, char **argv) {
 	  cv::namedWindow(WIN_ANALYZE);
 	  cv::namedWindow(WIN_DEBUG);
 
-	  //  assert(checkBlackWhiteCross(generateMarkerTemplate(cv::Size(64, 64))));
 
-      cv::Mat img_source, img_gray, img_edges, img_gray_blur;
+      cv::Mat img_source, img_gray, img_bw, img_edges, img_gray_blur;
 
-      int canny_low = 255, canny_high = 255, erosion_size = 3, canny_ratio = 50;
-      cv::createTrackbar("Canny Low", WIN_DEBUG, &canny_low, 512);
-      cv::createTrackbar("Canny High", WIN_DEBUG, &canny_high, 512);
-      cv::createTrackbar("Kernel size: 2n +1", WIN_DEBUG, &erosion_size, 11);
-      cv::createTrackbar("Canny ratio", WIN_DEBUG, &canny_ratio, 100);
+      printf("using potrace: %s\n", potrace_version());
+
+
 
 	  while (sourceCapture.isOpened()) //Show the image captured in the window and repeat
 	    {
 	      sourceCapture.read(img_source);
-
-	      /// Convert the image to grayscale
 	      cvtColor(img_source, img_gray, CV_BGR2GRAY);
 	      uchar med = 0;
 	      assert(median(img_gray, med));
+	      cv::threshold(img_gray, img_bw, med, 255, cv::THRESH_BINARY);
 
-	      cv::GaussianBlur(img_gray, img_gray_blur, cv::Size(0, 0), 3);
-	      cv::addWeighted(img_gray, 1.5, img_gray_blur, -0.5, 0, img_gray);
+	      potrace_bitmap_t* bm = create_bm_from_Mat(img_bw);
+	      assert(bm != nullptr);
+	      potrace_param_t* param = potrace_param_default();
+	      potrace_state_t *state = potrace_trace(param, bm);
+	      assert(state->status == POTRACE_STATUS_OK);
 
-//	      cv::Canny(img_gray, img_edges, canny_low, canny_high);
-	      cv::Canny(img_gray, img_edges, med * ((0. + canny_ratio) / 100.), med * ((100. + canny_ratio) / 100.));
-
-
-	      cv::Mat element = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(2 * erosion_size + 1, 2 * erosion_size + 1), cv::Point(erosion_size, erosion_size));
-
-//	      cv::dilate(img_edges, img_edges, element);
-
+	      potrace_path_t* path = state->plist;
 	      std::vector<std::vector<cv::Point> > contours;
-          std::vector<cv::Vec4i> hierarchy;
-          cv::findContours(img_edges, contours, hierarchy, CV_RETR_TREE, CV_CHAIN_APPROX_NONE);
+	      contours.empty();
+	      while (path != nullptr) {
+	    	  std::vector<cv::Point> contour;
+	    	  for (int i = 0; i < path->curve.n; ++i) {
+	    		  path->curve.tag[i];
+	    		  contour.push_back(cv::Point(path->curve.c[i][2].x, path->curve.c[i][2].y));
+	    	  }
+	    	  contours.push_back(contour);
+	    	  path = path->next;
+	      }
+	      printf("%d\n", contours.size());
+	      cv::drawContours(img_source, contours, -1, cv::Scalar(0, 0, 0), 2);
+	      potrace_state_free(state);
+	      release_bm(bm);
+		  potrace_param_free(param);
 
-
-          increase_colour_saturation(img_source, 20);
-	      cv::GaussianBlur(img_source, img_source, cv::Size(5, 5), 7);
-//          double img_area_threshold = img_source.rows * img_source.cols * 0.0001; // 1%
-          for(int idx = 0; idx >= 0; idx = hierarchy[idx][0] )
-          {
-//        	  double area = cv::contourArea(contours[idx]);
-//        	  printf("%f %f\n", img_area_threshold, area);
-//        	  if (area < img_area_threshold)
-//        		  continue;
-              cv::Scalar color(0, 0, 0); //rand()&255
-              cv::drawContours(img_source, contours, idx, color, 2, 8, hierarchy);
-          }
-
-	      cv::imshow(WIN_ANALYZE, img_edges);
+	      /// Convert the image to grayscale
 	      cv::imshow(WIN_MAIN, img_source);
-	      cv::imshow(WIN_DEBUG, img_gray);
+	      cv::imshow(WIN_DEBUG, img_bw);
 	      char c = cv::waitKey(33);
 	      if (c == 27) {
 	    	  cv::imwrite("/tmp/lastframe.jpg", img_source);
