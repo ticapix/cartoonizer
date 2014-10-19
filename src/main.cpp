@@ -5,6 +5,7 @@
 #include <array>
 #include <tuple>
 #include <math.h>
+#include <functional>
 
 #define LOG(preffix, fmt, ...) printf(preffix fmt "\n", __VA_ARGS__);
 #define LOG_ERROR(fmt, ...) LOG("EE ", fmt, __VA_ARGS__)
@@ -43,6 +44,37 @@ bool median(cv::Mat img, uchar& m) {
 		}
 	}
 	return false;
+}
+
+void for_each_pixel(cv::Mat &image, std::function<void(uchar * const pixel, int channels)> fn) {
+	int rows = image.rows;
+	int cols = image.cols;
+	int channels = image.channels();
+
+	if (image.isContinuous()) {
+		cols = cols * rows;
+		rows = 1;
+	}
+
+	for (int j=0; j<rows; ++j) {
+		auto pixel = image.ptr(j);
+		for (int i=0; i<cols; ++i, pixel += channels)
+			fn(pixel, channels);
+	}
+}
+
+void increase_colour_saturation(cv::Mat &image, uchar inc) {
+	cv::Mat hsv;
+	cvtColor(image, hsv, CV_BGR2HSV);
+
+	for_each_pixel(hsv, [&inc](uchar * const pixel, int /*channels*/) {
+		if (pixel[1] <= 255-inc)
+			pixel[1] += inc;
+		else
+			pixel[1] = 255;
+	});
+
+	cvtColor(hsv, image, CV_HSV2BGR);
 }
 
 int main(int argc, char **argv) {
@@ -93,11 +125,18 @@ int main(int argc, char **argv) {
           std::vector<cv::Vec4i> hierarchy;
           cv::findContours(img_edges, contours, hierarchy, CV_RETR_TREE, CV_CHAIN_APPROX_NONE);
 
-          int idx = 0;
-          for( ; idx >= 0; idx = hierarchy[idx][0] )
+
+          increase_colour_saturation(img_source, 20);
+	      cv::GaussianBlur(img_source, img_source, cv::Size(5, 5), 7);
+//          double img_area_threshold = img_source.rows * img_source.cols * 0.0001; // 1%
+          for(int idx = 0; idx >= 0; idx = hierarchy[idx][0] )
           {
-              cv::Scalar color(0); //rand()&255
-              cv::drawContours(img_gray, contours, idx, color, CV_FILLED, 8, hierarchy);
+//        	  double area = cv::contourArea(contours[idx]);
+//        	  printf("%f %f\n", img_area_threshold, area);
+//        	  if (area < img_area_threshold)
+//        		  continue;
+              cv::Scalar color(0, 0, 0); //rand()&255
+              cv::drawContours(img_source, contours, idx, color, 2, 8, hierarchy);
           }
 
 	      cv::imshow(WIN_ANALYZE, img_edges);
